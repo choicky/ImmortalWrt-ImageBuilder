@@ -87,9 +87,9 @@ git push origin custom
 > 下列 SHA、领先/落后数量与 Release 资产均为**本次核验时点**的状态;后续同步上游后,请以 `git`/`gh` 实测为准,勿将其当作当前实时值。
 
 **A. 分支规范化 —— 已完成**
-- `master` 纯上游:`origin/master == upstream/master == c2744d7`(ahead/behind **0/0**,tree 完全一致)。
-- `custom` 从规范化后的 `master` 派生,`master` 是其祖先(领先 **2**、落后 **0**);`custom` 时点头条 = `3328f0a`。
-- 历史备份见第 7 节,已在任何历史改写之前推送并验证。
+- `master` 纯上游:`origin/master == upstream/master == c2744d7`(ahead/behind **0/0**,tree 完全一致)。此 SHA 稳定,不受本轮收尾影响。
+- `custom` 从规范化后的 `master` 派生,`master` 是其**祖先**;其内容 = `master` + `shell/apk-custom-packages.sh` 两行构建定制 + 本 `FORK.md` 维护文档。`custom` 的**头条 SHA 与领先提交数会随文档提交而推进**,请以 `git rev-parse custom`、`git rev-list --left-right --count master...custom` 实测为准,本文不硬编码,以免收尾后再漂移。
+- 历史备份见第 7 节,已在任何历史改写之前推送并验证,备份分支/标签均指向 `990b069`(稳定)。
 
 **B. 代码 / Git 状态 —— 已独立核验(通过)**
 - `custom` 相对 `master`:**参与构建的改动**仅为 `shell/apk-custom-packages.sh`(两行定制 + 一行说明注释);另有本维护文档 `FORK.md`(**不参与构建**)。
