@@ -43,7 +43,13 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-theme-aurora luci-app-aurora-config luci-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES xray-core sing-box hysteria luci-i18n-passwall-zh-cn"
 #CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-openclash luci-compat kmod-tun kmod-inet-diag kmod-nft-tproxy bash curl ip-full unzip"
 # VPN
-#CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard"
+# choicky 定制:R3S/R4S 原生 WireGuard 中转节点。wireguard-tools 同时提供
+# /lib/netifd/proto/wireguard.sh(netifd 的 wireguard proto 处理器);两者缺一,
+# 升级后 wg_site 接口就无法创建。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-wireguard wireguard-tools"
+# choicky 定制:ZeroTier 备用路由。必须与 WireGuard 一同内置,否则保留配置升级后
+# 该软件包被移除,ZeroTier 路由随之消失。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES zerotier luci-app-zerotier"
 #CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn"
 # 内网穿透
 #CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-zerotier-zh-cn"

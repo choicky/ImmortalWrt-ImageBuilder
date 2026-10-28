@@ -12,11 +12,15 @@
 ## 2. 个人定制(仅 25.12.x)
 
 ### 位置
-定制只改一个文件:**`shell/apk-custom-packages.sh`**,取消其中两行的注释(Aurora 主题行、PassWall 行)。
+定制只涉及两处,且都只存在于 `custom` 分支:
+
+1. **`shell/apk-custom-packages.sh`** —— 取消 Aurora 主题行、PassWall 行的注释(原有定制),并新增 WireGuard / ZeroTier 两行(见下)。
+2. **`files/lib/upgrade/keep.d/wg-site`** —— 新增文件,只声明两条 sysupgrade 保留路径。它不含任何密钥内容、不含设备运行配置,可安全入库。
 
 ### 生效范围:为什么只有 25.12.x
 - 25.12.x 使用 APK 包管理,其构建脚本 `*/build25.sh` 会 `source shell/apk-custom-packages.sh`(rockchip、x86-64、mediatek-filogic、sunxi-cortexa53 的 build25 均是),清单里的 `CUSTOM_PACKAGES` 随后被并入 `make image ... PACKAGES=...`。
 - 24.10.x 及更早版本使用 opkg,其 `*/build24.sh` / `build23.sh` `source shell/custom-packages.sh`(不是 apk 清单)。
+- `files/lib/upgrade/keep.d/wg-site` 走 `FILES=` 覆盖层,同样只对 25.12.x 生效;它对未安装这些路径的设备是空操作(见「升级保留」)。
 - 本 fork **不修改 `shell/custom-packages.sh`**,故 24.10.x 及更早固件**不包含本 fork 新增的个人定制**(此项仅说明本 fork 定制不外溢,不对上游默认包含哪些软件包作断言)。这是有意为之:按约定,Aurora 主题与 PassWall 相关软件包只保留在 25.12.x。
 
 ### 内容(取消注释后并入的包)
@@ -25,7 +29,28 @@
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-theme-aurora luci-app-aurora-config luci-i18n-aurora-config-zh-cn"
 # PassWall 相关(内核 + 中文语言包)
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES xray-core sing-box hysteria luci-i18n-passwall-zh-cn"
+# R3S/R4S 原生 WireGuard 中转节点与 ZeroTier 备用路由
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-wireguard wireguard-tools zerotier luci-app-zerotier"
 ```
+
+### 升级保留(sysupgrade)
+
+目标:保留配置升级后,R3S/R4S 的 WireGuard 中转与 ZeroTier 备用路由能自行恢复,不依赖任何恢复脚本或常驻服务。
+
+**软件包必须内置。** `sysupgrade` 会整体替换 rootfs,已安装但不在新镜像中的包会消失。因此 WireGuard 与 ZeroTier 必须出现在 `CUSTOM_PACKAGES` 里:
+- `kmod-wireguard` + `wireguard-tools`:后者同时提供 `/lib/netifd/proto/wireguard.sh`(netifd 的 wireguard proto 处理器)。缺任一项,`wg_site` 在升级后无法创建。
+- `zerotier` + `luci-app-zerotier`:ZeroTier 备用路由的运行前提。
+
+**配置文件使用原生保留,无需额外处理。** `/etc/config/`(含 `network`、`firewall`)由 `base-files` 包自带 `keep.d` 保留;`/etc/sing-box/` 由 sing-box 包自带 `keep.d` 保留;`firewall4` 保留 `/etc/nftables.d/`。因此 `wg_site` 接口、两条 /25 与一条 /24 的 `config route`、`lan↔wg_site` 转发、sing-box 配置都在原处。
+
+**两处默认不保留、必须补的。** ZeroTier 包自带的 `keep.d` 只列 `/etc/zerotier.conf` 与 `/etc/zerotier`,不含节点身份目录;WireGuard 私钥备份文件也不在任何默认清单内。`files/lib/upgrade/keep.d/wg-site` 补上:
+
+| 路径 | 为什么 |
+| --- | --- |
+| `/etc/wg-site.key` | 私钥备份副本(权威私钥仍在 `/etc/config/network` 的 `private_key`,此文件只是备份) |
+| `/var/lib/zerotier-one` | `identity.secret` / `identity.public` / `authtoken.secret`。丢失后节点以新 ID 入网,私有网络需重新授权,备用路由失效 |
+
+**边界。** 以上只保证"保留配置升级"路径;刷写时不勾选保留配置(或使用 `sysupgrade -n`)则一切配置按新装处理。该 `keep.d` 文件位于 `files/`,会随本仓库所有 25.12.x 目标进入镜像;对不含这些路径的设备,`sysupgrade` 的 `find` 会忽略不存在的条目,无副作用。
 
 ### 依赖语义(附一手核验证据,核验于 2026-10-21)
 - **PassWall 本体会被装入。** 清单只请求 `luci-i18n-passwall-zh-cn`(中文语言包),未显式列 `luci-app-passwall` 本体;经一手证据核实本体会随依赖被拉入:
@@ -92,7 +117,7 @@ git push origin custom
 - 历史备份见第 7 节,已在任何历史改写之前推送并验证,备份分支/标签均指向 `990b069`(稳定)。
 
 **B. 代码 / Git 状态 —— 已独立核验(通过)**
-- `custom` 相对 `master`:**参与构建的改动**仅为 `shell/apk-custom-packages.sh`(两行定制 + 一行说明注释);另有本维护文档 `FORK.md`(**不参与构建**)。
+- `custom` 相对 `master`:**参与构建的改动**为 `shell/apk-custom-packages.sh`(Aurora / PassWall / WireGuard / ZeroTier 定制行及说明注释)与 `files/lib/upgrade/keep.d/wg-site`(sysupgrade 保留清单,不含密钥或设备配置);另有本维护文档 `FORK.md`(**不参与构建**)。
 - `shell/custom-packages.sh` 未被改动 → 24.10.x 及更早不包含本 fork 新增的个人定制。
 - 语法检查(`bash -n` / `sh -n`):`apk-custom-packages.sh`、`custom-packages.sh`、`rockchip/build25.sh`、`apk-prepare-packages.sh` 均通过。
 - 运行时解析(非破坏性):

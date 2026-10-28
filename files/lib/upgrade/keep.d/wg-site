@@ -1,0 +1,13 @@
+# R3S/R4S WireGuard 中转节点的升级保留项(choicky custom 分支注入)
+#
+# 原生保留已覆盖: /etc/config/(含 network、firewall)、/etc/sing-box/(sing-box
+# 包自带 keep.d)、ZeroTier 包自带 keep.d 只列 /etc/zerotier.conf 与 /etc/zerotier。
+#
+# 下列两项不在任何默认保留清单内:
+
+# WireGuard 私钥备份副本(权威私钥仍在 /etc/config/network 的 private_key)
+/etc/wg-site.key
+
+# ZeroTier 节点身份(identity.secret / identity.public / authtoken.secret)。
+# 丢失会导致节点以新 ID 重新入网,私有网络需重新授权,备用路由失效。
+/var/lib/zerotier-one
