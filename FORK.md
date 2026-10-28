@@ -12,14 +12,16 @@
 ## 2. 个人定制(仅 25.12.x)
 
 ### 位置
-定制只涉及两处,且都只存在于 `custom` 分支:
+定制只涉及三处,且都只存在于 `custom` 分支:
 
-1. **`shell/apk-custom-packages.sh`** —— 取消 Aurora 主题行、PassWall 行的注释(原有定制),并新增 WireGuard / ZeroTier 两行(见下)。
-2. **`files/lib/upgrade/keep.d/wg-site`** —— 新增文件,只声明两条 sysupgrade 保留路径。它不含任何密钥内容、不含设备运行配置,可安全入库。
+1. **`shell/apk-custom-packages.sh`** —— 取消 Aurora 主题行、PassWall 行的注释(原有定制),并新增 WireGuard / ZeroTier / luci-app-singbox-admin 三行。
+2. **`shell/apk-prepare-packages.sh`** —— 在原有"收集 .run 解包出的 .apk"之后追加一段:按固定版本下载 `luci-app-singbox-admin` 的 APK 到 `packages/`,改名成 `<name>-<version>.apk` 并校验 SHA-256。只影响 APK 收集,不参与其它包的解析。
+3. **`files/lib/upgrade/keep.d/wg-site`** —— 新增文件,只声明三条 sysupgrade 保留路径。它不含任何密钥内容、不含设备运行配置,可安全入库。
 
 ### 生效范围:为什么只有 25.12.x
 - 25.12.x 使用 APK 包管理,其构建脚本 `*/build25.sh` 会 `source shell/apk-custom-packages.sh`(rockchip、x86-64、mediatek-filogic、sunxi-cortexa53 的 build25 均是),清单里的 `CUSTOM_PACKAGES` 随后被并入 `make image ... PACKAGES=...`。
 - 24.10.x 及更早版本使用 opkg,其 `*/build24.sh` / `build23.sh` `source shell/custom-packages.sh`(不是 apk 清单)。
+- `shell/apk-prepare-packages.sh` 只被这四个 `build25.sh` 调用(与 apk 清单同一生效范围),24.10.x 及更早用的是 opkg 侧的 `shell/prepare-packages.sh`,不受影响。
 - `files/lib/upgrade/keep.d/wg-site` 走 `FILES=` 覆盖层,同样只对 25.12.x 生效;它对未安装这些路径的设备是空操作(见「升级保留」)。
 - 本 fork **不修改 `shell/custom-packages.sh`**,故 24.10.x 及更早固件**不包含本 fork 新增的个人定制**(此项仅说明本 fork 定制不外溢,不对上游默认包含哪些软件包作断言)。这是有意为之:按约定,Aurora 主题与 PassWall 相关软件包只保留在 25.12.x。
 
@@ -31,32 +33,75 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-theme-aurora luci-app-aurora-config luci-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES xray-core sing-box hysteria luci-i18n-passwall-zh-cn"
 # R3S/R4S 原生 WireGuard 中转节点与 ZeroTier 备用路由
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-wireguard wireguard-tools zerotier luci-app-zerotier"
+# sing-box Web 管理面板(第三方固定版本 APK,由 apk-prepare-packages.sh 投放到 packages/)
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-singbox-admin"
 ```
 
 ### 升级保留(sysupgrade)
 
-目标:保留配置升级后,R3S/R4S 的 WireGuard 中转与 ZeroTier 备用路由能自行恢复,不依赖任何恢复脚本或常驻服务。
+目标:保留配置升级后,R3S/R4S 的 WireGuard 中转、ZeroTier 备用路由与 sing-box 面板设置能自行恢复,不依赖任何恢复脚本或常驻服务。
 
-**软件包必须内置。** `sysupgrade` 会整体替换 rootfs,已安装但不在新镜像中的包会消失。因此 WireGuard 与 ZeroTier 必须出现在 `CUSTOM_PACKAGES` 里:
-- `kmod-wireguard` + `wireguard-tools`:后者同时提供 `/lib/netifd/proto/wireguard.sh`(netifd 的 wireguard proto 处理器)。缺任一项,`wg_site` 在升级后无法创建。
+**软件包必须内置。** `sysupgrade` 会整体替换 rootfs,已安装但不在新镜像中的包会消失。因此下列包必须出现在 `CUSTOM_PACKAGES` 里:
+- `kmod-wireguard` + `wireguard-tools`:后者自带 `/lib/netifd/proto/wireguard.uc`(25.12 起 netifd 的 wireguard proto 处理器是 ucode 实现,不再是 `.sh`),并依赖 `kmod-wireguard`。缺任一项,`wg_site` 在升级后无法创建。
 - `zerotier` + `luci-app-zerotier`:ZeroTier 备用路由的运行前提。
+- `luci-app-singbox-admin`:面板本体(投放方式见下一节)。
 
-**配置文件使用原生保留,无需额外处理。** `/etc/config/`(含 `network`、`firewall`)由 `base-files` 包自带 `keep.d` 保留;`/etc/sing-box/` 由 sing-box 包自带 `keep.d` 保留;`firewall4` 保留 `/etc/nftables.d/`。因此 `wg_site` 接口、两条 /25 与一条 /24 的 `config route`、`lan↔wg_site` 转发、sing-box 配置都在原处。
+**keep.d 的语义(决定什么必须显式列)。** `sysupgrade` 默认(`-c`)只备份两类文件:①`/lib/upgrade/keep.d/*` 与 `/etc/sysupgrade.conf` 中列出的路径(目录会展开成其中的文件与软链);②APK 登记的 `/etc` 受保护文件(conffiles;24.10 及更早由 opkg 的 conffiles 承担)。**`base-files` 自带的 `keep.d/base-files-essential` 并不包含 `/etc/config/`**,该目录是靠 conffiles 机制保留的,不要把它记成 keep.d 的功劳。
 
-**两处默认不保留、必须补的。** ZeroTier 包自带的 `keep.d` 只列 `/etc/zerotier.conf` 与 `/etc/zerotier`,不含节点身份目录;WireGuard 私钥备份文件也不在任何默认清单内。`files/lib/upgrade/keep.d/wg-site` 补上:
+因此下列内容无需在本仓库重复声明:
 
-| 路径 | 为什么 |
+| 路径 | 由谁保留 |
 | --- | --- |
-| `/etc/wg-site.key` | 私钥备份副本(权威私钥仍在 `/etc/config/network` 的 `private_key`,此文件只是备份) |
-| `/var/lib/zerotier-one` | `identity.secret` / `identity.public` / `authtoken.secret`。丢失后节点以新 ID 入网,私有网络需重新授权,备用路由失效 |
+| `/etc/config/network`(含 `wg_site` 的 `private_key`、两条 /25 与一条 /24 的 `config route`、转发) | netifd conffile |
+| `/etc/config/zerotier`(含 `global.secret`) | zerotier conffile |
+| `/etc/config/firewall`、`/etc/nftables.d/` | firewall4 conffile / 自带 keep.d |
+| `/etc/config/singbox` | **不自动保留**,由本仓库 `keep.d` 补(见下) |
+| `/etc/sing-box/`(config.json、nftables.sh、backups/) | **不自动保留**,由本仓库 `keep.d` 补:sing-box 包没有 `keep.d`,`config.json` 用 `INSTALL_DATA` 安装、不是 conffile |
 
-**边界。** 以上只保证"保留配置升级"路径;刷写时不勾选保留配置(或使用 `sysupgrade -n`)则一切配置按新装处理。该 `keep.d` 文件位于 `files/`,会随本仓库所有 25.12.x 目标进入镜像;对不含这些路径的设备,`sysupgrade` 的 `find` 会忽略不存在的条目,无副作用。
+**ZeroTier 身份不需要额外保留。** `/var/lib/zerotier-one` 是运行时目录(`/var` 指向 tmpfs):`/etc/init.d/zerotier` 每次 start/stop 都 `rm -rf` 后重建(配置了 `config_path` 时重建为指向它的软链),节点身份实际取自 `/etc/config/zerotier` 的 `global.secret`,而该文件是 conffile。故 `keep.d` **不列** `/var/lib/zerotier-one`——列了也只能备份到一个随即被删除的软链。若曾把 `config_path` 改到 `/etc` 之外(例如 `/root/zerotier`),那次升级前必须按下面的检查清单把它补进 `/etc/sysupgrade.conf`。
+
+**需要 keep.d 补的三条。** `files/lib/upgrade/keep.d/wg-site` 只列这三项,原因都是"不属于任何软件包的 conffiles":
+
+| 路径 | 为什么默认不会备份 |
+| --- | --- |
+| `/etc/wg-site.key` | 用户自建的私钥备份副本;私钥权威副本仍在 `/etc/config/network` 的 `private_key`,由 conffile 保留 |
+| `/etc/config/singbox` | `luci-app-singbox-admin` 的 APK 由上游 `apk mkpkg` 直接生成,没有 conffiles 元数据 |
+| `/etc/sing-box/` | sing-box 包不带 `keep.d`,`config.json` 不是 conffile;面板的 config 备份与 `nftables.sh` 也在此目录 |
+
+**首次升级前必须自查(关键)。** 新固件里的 `keep.d` 只对"以后"的升级生效;从当前设备升到本固件那一次,用的是**旧固件自己的** `keep.d` 与 `/etc/sysupgrade.conf`——旧固件不认识 `/etc/wg-site.key`。所以升级前先在 R3S/R4S 上执行:
+
+```sh
+sysupgrade -l | grep -E '^/etc/(config/(network|zerotier|firewall|singbox)|sing-box/|wg-site\.key)'
+```
+
+期望至少看到 `/etc/config/network`、(装了 ZeroTier 时)`/etc/config/zerotier`、(之前装过面板时)`/etc/config/singbox`。旧固件通常看不到 `/etc/wg-site.key` 与 `/etc/sing-box/`——它们默认不在任何清单里,按需要补:
+
+```sh
+echo /etc/wg-site.key  >> /etc/sysupgrade.conf   # WireGuard 私钥备份副本
+echo /etc/sing-box/    >> /etc/sysupgrade.conf   # sing-box 的 config.json / nftables.sh
+sysupgrade -l | grep -E 'wg-site\.key|sing-box/'  # 复查
+```
+
+缺其他路径(例如自定义的 ZeroTier `config_path`)同样追加到 `/etc/sysupgrade.conf`,复查通过后再升级。从本固件之后再升级,这些路径已由镜像内的 `keep.d` 自动覆盖,不必重复添加。
+
+**边界。** 以上只保证"保留配置升级"路径;刷写时不勾选保留配置(或 `sysupgrade -n`)则一切按新装处理。该 `keep.d` 文件位于 `files/`,会随本仓库所有 25.12.x 目标进入镜像;对不含该路径的设备,`sysupgrade` 的 `find` 会忽略不存在的条目,无副作用。
+
+### luci-app-singbox-admin(第三方 APK:来源、版本、投放)
+
+- **为什么用上游制品。** 本 fork 的 `choicky/luci-app-singbox-admin` 没有 tag、Release,也没有 Actions 制品(2026-10-29 核实),不存在"choicky 仓库可用的稳定 APK";插件源码未做任何修改,直接取上游正式发布。
+- **来源与版本。** `yukiinagato/luci-app-singbox-admin` 的 v4.1.1 Release,`luci-app-singbox-admin_4.1.1-r1_all.apk`(29 674 B,SHA-256 `2fc67133c95c93978c1920e57548f52ad40c10423610220d79f34af9fc174410`,arch `noarch`)。URL 与 SHA-256 固定写在 `shell/apk-prepare-packages.sh`,不跟随 `latest`。
+- **文件名必须改。** ImageBuilder 用 `apk mkndx` 为 `packages/*.apk` 建索引,安装时按 `<name>-<version>.apk` 找文件;把上游的 `…_4.1.1-r1_all.apk` 原名放进去会报 `package mentioned in index not found`。脚本因此落盘为 `luci-app-singbox-admin-4.1.1-r1.apk`。
+- **依赖可满足。** APK 声明依赖 `luci-base`、`sing-box`、`nftables`;`sing-box` 已在本清单的 PassWall 行内,`nftables` 由 ImmortalWrt 默认镜像(firewall4)提供。
+- **签名。** 上游制品未签名。ImageBuilder 建索引时用 `--allow-untrusted` 接收外部 APK,再用本地构建密钥重签 `packages.adb`;安装时校验的是该索引及其中的哈希,因此未签名包可以装入(已用 apk-tools 3.0.8 按同一参数组合实测通过)。
+- **不覆盖现有 sing-box 配置。** 包内只有 `/etc/config/singbox`(面板自身设置)与 `/usr/libexec/singbox-*`、LuCI 静态资源等,不含 `/etc/sing-box/`;sing-box 的 `config.json` 完全不碰。
+- **不自动启用防火墙规则。** `/usr/share/singbox-admin/nftables.sh.example` 只是示例;`/etc/init.d/singbox-firewall` 安装时不建 `/etc/rc.d` 软链,`/etc/config/singbox` 的 `fw_boot` 默认为 `0`;且构建期 `apk add` 带 `--no-scripts`,`postinst` 不会执行。
+- **升级保留。** 该 APK 由上游 `apk mkpkg` 直接生成,没有 conffiles 元数据,构建期不会产生 `conffiles_static`;因此 `/etc/config/singbox` 由本仓库的 `keep.d` 显式声明保留。它自己的 `postinst` 会在构建期被 `--no-scripts` 跳过,不会改动构建环境。
 
 ### 依赖语义(附一手核验证据,核验于 2026-10-21)
 - **PassWall 本体会被装入。** 清单只请求 `luci-i18n-passwall-zh-cn`(中文语言包),未显式列 `luci-app-passwall` 本体;经一手证据核实本体会随依赖被拉入:
   - ImmortalWrt `luci` feed 的打包模板 `luci.mk` 会为每种语言生成 `luci-i18n-<pkg>-<lang>` 子包并设 `DEPENDS:=$(PKG_NAME)`,故 `luci-i18n-passwall-zh-cn` 依赖 `luci-app-passwall`;`make image PACKAGES=…` 按 apk 依赖解析,请求 i18n 即拉入本体。
   - 25.12.x 构建经 `build25.sh` 从 `wukongdaily/apk` 解包:PassWall run(26.6.2)实际捆绑了 `luci-app-passwall`、`luci-i18n-passwall-zh-cn`、`xray-core`、`sing-box`、`hysteria`、`geoview` 及 chinadns-ng / dns2socks / tcping / v2ray-geoip / v2ray-geosite 等 apk,统一收集进本地 `packages/` 供解析安装。
-  - 证据边界:上述依据来自打包规则(`luci.mk` 源码)与捆绑包清单(一手);**本机未能解析预构建 `.apk` 的二进制 `.PKGINFO`**(`ADBd` 容器,本地无对应解析器)。因此单个预构建 apk 内 `depend` 字面串未做二进制级复核。
+  - 证据边界:上述依据来自打包规则(`luci.mk` 源码)与捆绑包清单(一手)。`.apk` 是 `ADBd` 容器,本轮用 apk-tools 3.0.8 解析了 `luci-app-singbox-admin` 的元数据,但 passwall run 内的各个 apk 未逐一做二进制级 `depend` 复核。
 - **`geoview` 定性。** `geoview` 是 `luci-app-passwall` 的构建期 `select`(`INCLUDE_Geoview` 在 aarch64 默认 `y`),其 apk 已随 run 捆绑于 `packages/`,会作为本体的传递依赖被自动解析。故清单**无需显式列出 `geoview`**;列出与自动解析结果等价,显式列出反而与传递解析重复。上游把 `geoview` 写进该行只是显式化。**最终固件仍会包含 geoview**(经本体依赖)。本定制**不改用 PassWall2**。
 - **Aurora 无缺失本体。** `aurora/` 捆绑的正是清单所请求的 `luci-theme-aurora`、`luci-app-aurora-config`、`luci-i18n-aurora-config-zh-cn` 三项。
 
@@ -76,7 +121,7 @@ git push origin master
 # 3) 把更新后的 master 整合进 custom(优先普通 merge)
 git checkout custom
 git merge master
-#   若 shell/apk-custom-packages.sh 冲突:在 custom 上解决,保留本 fork 的两行定制语义,
+#   若 shell/apk-custom-packages.sh 冲突:在 custom 上解决,保留本 fork 定制块的语义,
 #   不要把定制反向合进 master。
 
 # 4) 检查定制仍然有效(见第 6 节的 source 解析自检)
@@ -107,38 +152,43 @@ git push origin custom
 - **Docker 开关的实际生效路径**:`build25.sh` 依据 `INCLUDE_DOCKER` 环境变量加入 `luci-i18n-dockerman-zh-cn`;而工作流中 `echo '… docker' >> shell/custom-packages.sh` 一步针对的是 opkg 清单(25.12.x 的 `build25.sh` 并不读取它),对 25.12.x 而言是无副作用的遗留步骤。此为**上游既有行为**,与本 fork 定制无关,本轮不修改。
 - 工作流的发布机制沿用上游设计,本 fork **不修改**上游工作流。
 
-## 6. 完成状态与验证证据(核验时间 2026-10-21)
+## 6. 完成状态与验证证据(核验时间 2026-10-29)
 
 > 下列 SHA、领先/落后数量与 Release 资产均为**本次核验时点**的状态;后续同步上游后,请以 `git`/`gh` 实测为准,勿将其当作当前实时值。
 
 **A. 分支规范化 —— 已完成**
 - `master` 纯上游:`origin/master == upstream/master == c2744d7`(ahead/behind **0/0**,tree 完全一致)。此 SHA 稳定,不受本轮收尾影响。
-- `custom` 从规范化后的 `master` 派生,`master` 是其**祖先**;其内容 = `master` + `shell/apk-custom-packages.sh` 两行构建定制 + 本 `FORK.md` 维护文档。`custom` 的**头条 SHA 与领先提交数会随文档提交而推进**,请以 `git rev-parse custom`、`git rev-list --left-right --count master...custom` 实测为准,本文不硬编码,以免收尾后再漂移。
+- `custom` 从规范化后的 `master` 派生,`master` 是其**祖先**;其内容 = `master` + `shell/apk-custom-packages.sh` 的定制行 + `shell/apk-prepare-packages.sh` 的固定版本 APK 投放 + `files/lib/upgrade/keep.d/wg-site` + 本 `FORK.md` 维护文档。`custom` 的**头条 SHA 与领先提交数会随文档提交而推进**,请以 `git rev-parse custom`、`git rev-list --left-right --count master...custom` 实测为准,本文不硬编码,以免收尾后再漂移。
 - 历史备份见第 7 节,已在任何历史改写之前推送并验证,备份分支/标签均指向 `990b069`(稳定)。
 
 **B. 代码 / Git 状态 —— 已独立核验(通过)**
-- `custom` 相对 `master`:**参与构建的改动**为 `shell/apk-custom-packages.sh`(Aurora / PassWall / WireGuard / ZeroTier 定制行及说明注释)与 `files/lib/upgrade/keep.d/wg-site`(sysupgrade 保留清单,不含密钥或设备配置);另有本维护文档 `FORK.md`(**不参与构建**)。
+- `custom` 相对 `master`:**参与构建的改动**为 `shell/apk-custom-packages.sh`(Aurora / PassWall / WireGuard / ZeroTier / sing-box 面板定制行及说明注释)、`shell/apk-prepare-packages.sh`(固定版本 APK 下载 + SHA-256 校验)与 `files/lib/upgrade/keep.d/wg-site`(sysupgrade 保留清单,不含密钥或设备配置);另有本维护文档 `FORK.md`(**不参与构建**)。
 - `shell/custom-packages.sh` 未被改动 → 24.10.x 及更早不包含本 fork 新增的个人定制。
 - 语法检查(`bash -n` / `sh -n`):`apk-custom-packages.sh`、`custom-packages.sh`、`rockchip/build25.sh`、`apk-prepare-packages.sh` 均通过。
 - 运行时解析(非破坏性):
   ```bash
   bash -c 'CUSTOM_PACKAGES=""; source shell/apk-custom-packages.sh; echo "$CUSTOM_PACKAGES"'
   # 得到:luci-theme-aurora luci-app-aurora-config luci-i18n-aurora-config-zh-cn \
-  #      xray-core sing-box hysteria luci-i18n-passwall-zh-cn  (无重复项)
+  #      xray-core sing-box hysteria luci-i18n-passwall-zh-cn \
+  #      luci-app-singbox-admin kmod-wireguard wireguard-tools zerotier luci-app-zerotier
+  #      (无重复项)
   ```
-- 调用链:25.12.x 工作流 → 挂载并执行 `rockchip/build25.sh` → `source shell/apk-custom-packages.sh` → `make image PACKAGES=…`。
+- 调用链:25.12.x 工作流 → 挂载并执行 `rockchip/build25.sh` → `source shell/apk-custom-packages.sh` → `sh shell/apk-prepare-packages.sh`(把第三方 APK 放进 `packages/`)→ `make image PACKAGES=…`(ImageBuilder 重新生成 `packages.adb` 后解析安装)。
 
 **C. 软件包依赖 —— 已一手核实(见第 2 节)**
 - 已核实 `luci-i18n-passwall-zh-cn` 经 `luci.mk` 依赖并拉入 `luci-app-passwall` 本体;PassWall run 26.6.2 捆绑本体与全部相关 apk;`geoview` 为本体的传递依赖,会自动包含,无需显式列出。
-- 未做(已如实标注):本机未解析预构建 `.apk` 的二进制 `.PKGINFO`(`ADBd` 容器无本地解析器)。
+- `luci-app-singbox-admin` 的 APK 元数据已用 apk-tools 3.0.8 实测读出:name/version `4.1.1-r1`、arch `noarch`、depends `luci-base nftables sing-box`;并在临时 root 中完成 `mkndx` + `apk add` 实装,文件落点与 `/etc/config/singbox` 内容符合预期(见第 2 节)。
+- `wireguard-tools` 的 proto 处理器路径已按 ImmortalWrt `package/network/utils/wireguard-tools/Makefile` 核实为 `/lib/netifd/proto/wireguard.uc`;ZeroTier 身份的保存方式按 `packages/net/zerotier` 的 init 脚本与 Makefile 的 conffiles 核实。
 
 **D. 静态检查通过,端到端实构建未执行**
-- 未在本轮执行全新的固件实构建:本机无 docker;且经 GitHub Actions 实跑会覆盖既有 `Autobuild` Release 资产(受约束不得为验证而覆盖重要产物)。
+- 未在本轮执行全新的固件实构建:经 GitHub Actions 实跑会覆盖既有 `Autobuild` Release 资产(受约束不得为验证而覆盖重要产物),也不在本任务的验证范围内。
+- 已做的替代验证:podman 中 apk-tools 3.0.8 复现 ImageBuilder 的 `mkndx --allow-untrusted` + 本地密钥签名索引 + 不带 `--allow-untrusted` 的安装路径,确认未签名第三方 APK 可装入;脚本 `bash -n` / `sh -n` 通过。
 - 历史参考(**非当前版本验收**):`Autobuild` Release 于 2026-05-17 曾以定制态构建出 r3s/r4s 固件(资产当时仍在)。这不代表当前 `25.12.2` 及最新依赖的端到端结果。
-- 结论:**分支规范化、代码/Git 核验、依赖一手核实、静态与运行时检查均已通过;端到端实机构建本轮未执行。**
+- 结论:**代码/Git 核验、依赖一手核实、APK 投放机制实测、静态与运行时检查均已通过;端到端实机构建本轮未执行。**
 
 **E. 待维护者确认 / 执行**
-- 如需最终确认定制在实机构建中被正确包含:在 `custom` 分支按第 4 节触发一次 "Build 25.12.x Rockchip"(profile 选 r3s 或 r4s),并**接受该操作会更新 `Autobuild` Release**。构建产物应含 PassWall、Aurora;如清单某项在最新 feed 中解析失败,再据错误信息做最小调整。
+- 首次从现行固件升级前,按第 2 节「首次升级前必须自查」执行 `sysupgrade -l`,必要时补 `/etc/sysupgrade.conf`。
+- 如需最终确认定制在实机构建中被正确包含:在 `custom` 分支按第 4 节触发一次 "Build 25.12.x Rockchip"(profile 选 r3s 或 r4s),并**接受该操作会更新 `Autobuild` Release**。构建产物应含 PassWall、Aurora、WireGuard、ZeroTier 与 `luci-app-singbox-admin`;若清单某项在最新 feed 中解析失败,再据错误信息做最小调整。
 
 ## 7. 备份与恢复
 
