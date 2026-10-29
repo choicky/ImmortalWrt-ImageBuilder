@@ -42,8 +42,17 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-theme-aurora luci-app-aurora-config luci-
 # choicky 定制:启用 PassWall(沿用已验证包集,不含上游新增的 geoview;不改为 PassWall2)
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES xray-core sing-box hysteria luci-i18n-passwall-zh-cn"
 #CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-openclash luci-compat kmod-tun kmod-inet-diag kmod-nft-tproxy bash curl ip-full unzip"
+# choicky 定制:sing-box Web 管理面板。APK 不在任何仓库 feed 内,由
+# shell/apk-prepare-packages.sh 按固定版本下载到 packages/(见该脚本)。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-singbox-admin"
 # VPN
-#CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard"
+# choicky 定制:R3S/R4S 原生 WireGuard 中转节点。wireguard-tools 自带
+# /lib/netifd/proto/wireguard.uc(netifd 的 wireguard proto 处理器)并依赖
+# kmod-wireguard;缺一,升级后 wg_site 接口无法创建。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-wireguard wireguard-tools"
+# choicky 定制:ZeroTier 备用路由。必须与 WireGuard 一同内置,否则保留配置升级后
+# 该软件包被移除,ZeroTier 路由随之消失。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES zerotier luci-app-zerotier"
 #CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn"
 # 内网穿透
 #CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-zerotier-zh-cn"
