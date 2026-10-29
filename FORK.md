@@ -17,7 +17,7 @@
 1. **`shell/apk-custom-packages.sh`** —— 取消 Aurora 主题行、PassWall 行的注释(原有定制),并新增 WireGuard / ZeroTier / luci-app-singbox-admin 三行。
 2. **`shell/apk-prepare-packages.sh`** —— 在原有"收集 .run 解包出的 .apk"之后追加一段:按固定版本下载 `luci-app-singbox-admin` 的 APK 到 `packages/`,改名成 `<name>-<version>.apk` 并校验 SHA-256。只影响 APK 收集,不参与其它包的解析。
 3. **`files/lib/upgrade/keep.d/wg-site`** —— 新增文件,只声明三条 sysupgrade 保留路径。它不含任何密钥内容、不含设备运行配置,可安全入库。
-4. **`files/etc/uci-defaults/99-custom.sh`** —— 上游的首次启动脚本(经工作流 `-v …/files` 挂载进镜像),本 fork 只改其中的 WAN 初始化判断,见「首次启动脚本的 WAN 初始化」。
+4. **`files/etc/uci-defaults/99-custom.sh`** —— 上游的首次启动脚本(经工作流 `-v …/files` 挂载进镜像),本 fork 只改其中的 WAN 与 LAN 初始化判断,见「首次启动脚本(99-custom.sh)的网络初始化」。
 
 ### 生效范围:为什么只有 25.12.x
 - 25.12.x 使用 APK 包管理,其构建脚本 `*/build25.sh` 会 `source shell/apk-custom-packages.sh`(rockchip、x86-64、mediatek-filogic、sunxi-cortexa53 的 build25 均是),清单里的 `CUSTOM_PACKAGES` 随后被并入 `make image ... PACKAGES=...`。
@@ -92,20 +92,20 @@ sysupgrade -l | grep -E 'wg-site\.key|sing-box/|config/singbox'  # 复查
 
 **边界。** 以上只保证"保留配置升级"路径;刷写时不勾选保留配置(或 `sysupgrade -n`)则一切按新装处理。该 `keep.d` 文件位于 `files/`,会随本仓库所有 25.12.x 目标进入镜像;对不含该路径的设备,`sysupgrade` 的 `find` 会忽略不存在的条目,无副作用。
 
-### 首次启动脚本的 WAN 初始化(99-custom.sh)
+### 首次启动脚本(99-custom.sh)的网络初始化
 
-`files/etc/uci-defaults/99-custom.sh` 由 OpenWrt 的 uci-defaults 机制在首次启动时执行并自删。**sysupgrade 保留配置升级后,新镜像里这份脚本会再跑一次**,而此时 `/etc/config/network` 已经是还原回来的用户配置。原逻辑在多网口分支里无条件 `uci set network.wan.proto='dhcp'`,于是已配好的 PPPoE 被重置成 DHCP,WAN 直接不通。
+`files/etc/uci-defaults/99-custom.sh` 由 OpenWrt 的 uci-defaults 机制在首次启动时执行并自删。**sysupgrade 保留配置升级后,新镜像里这份脚本会再跑一次**,而此时 `/etc/config/network` 已经是还原回来的用户配置。原逻辑在多网口分支里无条件改写 WAN 与 LAN,于是升级后 PPPoE 被重置成 DHCP、LAN 地址/掩码/br-lan 端口被改回首次安装的值。
 
-修复后只动 WAN 这一段:
+修复只替换了这两处判断,写入的取值保持原样:
 
-| 判定 | 依据 | 行为 |
-| --- | --- | --- |
-| 已有 WAN 配置 | `network.wan.username` 非空,或 `network.wan.proto` 存在且不是 `dhcp`/`none` | 跳过 WAN 与 WAN6 的 `device`/`proto` 改写,跳过 PPPoE 凭据写入;协议、账号、密码原样保留 |
-| 固件默认 WAN(首次安装) | 上述都不满足 | 沿用原 workflow:写 `wan.proto=dhcp`、`wan6.proto=dhcpv6`;构建时 `enable_pppoe=yes` 再改成 PPPoE 并写账号密码 |
+| 对象 | 判定为"已有用户配置" | 已有配置时 | 仍是固件默认(首次安装) |
+| --- | --- | --- | --- |
+| WAN | `network.wan.username` 非空,或 `network.wan.proto` 存在且不是 `dhcp`/`none` | 跳过 WAN/WAN6 的 `device`/`proto` 改写与 PPPoE 凭据写入 | 写 `wan.proto=dhcp`、`wan6.proto=dhcpv6`;`enable_pppoe=yes` 时再改 PPPoE 并写账号密码 |
+| LAN | `network.lan.ipaddr` 非空且不是 `192.168.1.1`,或 `network.lan.proto` 存在且不是 `static` | 跳过 br-lan 端口、`lan.proto`/`netmask`/`ipaddr` 的改写 | 沿用原流程:改 br-lan 端口、`lan.proto=static`、掩码,地址取 `custom_router_ip.txt` 或 `192.168.100.1` |
 
-**为什么不只看 `network.wan` 是否存在:** 镜像自带的 `/etc/config/network` 里本来就有默认 WAN 段(proto=dhcp、无凭据),首次安装时它必然存在;用它当"已配置"的证据会把首次安装的 PPPoE 初始化也一起关掉。因此判断落在"协议是否已偏离固件默认 / 是否已有拨号凭据"上。
+**为什么不只看段是否存在:** 镜像自带的 `/etc/config/network` 本来就有默认 WAN(dhcp、无凭据)和默认 LAN(static、192.168.1.1/24),首次安装时它们必然存在;拿"存在"当"已配置"的证据会连带关掉首次安装的初始化。判断因此落在"值是否已偏离固件默认"上。LAN 的默认地址取自 ImmortalWrt 各目标共用的 192.168.1.1/24。
 
-**边界:** `enable_pppoe=yes` 的固件上,若设备当前 WAN 被人为改成无凭据的 DHCP,升级后仍会按首次安装路径写回 PPPoE——这种状态与固件默认 WAN 在 UCI 值上无法区分。默认构建(`enable_pppoe=no`)没有这个问题。LAN、WireGuard、ZeroTier、sing-box 及其余段落均未改动。
+**边界:** ①`enable_pppoe=yes` 的固件上,若设备 WAN 被人为改成无凭据的 DHCP,升级后仍会写回 PPPoE;②LAN 被人为设成 192.168.1.1 时,升级后仍会按首次安装路径改写;③固件默认 LAN 地址不是 192.168.1.1 的目标,首次安装会被判为"已配置"而跳过 LAN 初始化(不影响访问,只是不再套用 `custom_router_ip`)。这三种情况在 UCI 值上与"首次安装"无法区分。默认构建(`enable_pppoe=no`)不受 ①。WAN/LAN 之外的段落(防火墙、ttyd、dropbear、docker 等)均未改动。
 
 ### luci-app-singbox-admin(第三方 APK:来源、版本、投放)
 
@@ -179,11 +179,11 @@ git push origin custom
 
 **A. 分支规范化 —— 已完成**
 - `master` 纯上游:`origin/master == upstream/master == c2744d7`(ahead/behind **0/0**,tree 完全一致)。此 SHA 稳定,不受本轮收尾影响。
-- `custom` 从规范化后的 `master` 派生,`master` 是其**祖先**;其内容 = `master` + `shell/apk-custom-packages.sh` 的定制行 + `shell/apk-prepare-packages.sh` 的固定版本 APK 投放 + `files/lib/upgrade/keep.d/wg-site` + `files/etc/uci-defaults/99-custom.sh` 的 WAN 初始化判断 + 本 `FORK.md` 维护文档。`custom` 的**头条 SHA 与领先提交数会随文档提交而推进**,请以 `git rev-parse custom`、`git rev-list --left-right --count master...custom` 实测为准,本文不硬编码,以免收尾后再漂移。
+- `custom` 从规范化后的 `master` 派生,`master` 是其**祖先**;其内容 = `master` + `shell/apk-custom-packages.sh` 的定制行 + `shell/apk-prepare-packages.sh` 的固定版本 APK 投放 + `files/lib/upgrade/keep.d/wg-site` + `files/etc/uci-defaults/99-custom.sh` 的网络初始化判断 + 本 `FORK.md` 维护文档。`custom` 的**头条 SHA 与领先提交数会随文档提交而推进**,请以 `git rev-parse custom`、`git rev-list --left-right --count master...custom` 实测为准,本文不硬编码,以免收尾后再漂移。
 - 历史备份见第 7 节,已在任何历史改写之前推送并验证,备份分支/标签均指向 `990b069`(稳定)。
 
 **B. 代码 / Git 状态 —— 已独立核验(通过)**
-- `custom` 相对 `master`:**参与构建的改动**为 `shell/apk-custom-packages.sh`(Aurora / PassWall / WireGuard / ZeroTier / sing-box 面板定制行及说明注释)、`shell/apk-prepare-packages.sh`(固定版本 APK 下载 + SHA-256 校验)、`files/lib/upgrade/keep.d/wg-site`(sysupgrade 保留清单,不含密钥或设备配置)与 `files/etc/uci-defaults/99-custom.sh`(仅 WAN 初始化判断);另有本维护文档 `FORK.md`(**不参与构建**)。
+- `custom` 相对 `master`:**参与构建的改动**为 `shell/apk-custom-packages.sh`(Aurora / PassWall / WireGuard / ZeroTier / sing-box 面板定制行及说明注释)、`shell/apk-prepare-packages.sh`(固定版本 APK 下载 + SHA-256 校验)、`files/lib/upgrade/keep.d/wg-site`(sysupgrade 保留清单,不含密钥或设备配置)与 `files/etc/uci-defaults/99-custom.sh`(仅 WAN/LAN 初始化判断);另有本维护文档 `FORK.md`(**不参与构建**)。
 - `shell/custom-packages.sh` 未被改动 → 24.10.x 及更早不包含本 fork 新增的个人定制。
 - 语法检查(`bash -n` / `sh -n`):`apk-custom-packages.sh`、`custom-packages.sh`、`rockchip/build25.sh`、`apk-prepare-packages.sh` 均通过。
 - 运行时解析(非破坏性):
@@ -204,7 +204,9 @@ git push origin custom
 **D. 静态检查通过,端到端实构建未执行**
 - 未在本轮执行全新的固件实构建:经 GitHub Actions 实跑会覆盖既有 `Autobuild` Release 资产(受约束不得为验证而覆盖重要产物),也不在本任务的验证范围内。
 - 已做的替代验证:podman 中 apk-tools 3.0.8 复现 ImageBuilder 的 `mkndx --allow-untrusted` + 本地密钥签名索引 + 不带 `--allow-untrusted` 的安装路径,确认未签名第三方 APK 可装入;脚本 `bash -n` / `sh -n` 通过。
-- `99-custom.sh` 的 WAN 逻辑用容器 + 伪 `uci`(记录每条 `uci` 调用、KV 存状态)跑了三种最小场景,见第 2 节「首次启动脚本的 WAN 初始化」:首次安装(默认 dhcp)、首次安装 + `enable_pppoe=yes`、保留配置升级(pppoe + 账号密码)。前两种仍写入 dhcp/PPPoE,第三种对 WAN 无任何 `uci set`,`proto`/`username`/`password` 原样保留。
+- `99-custom.sh` 用容器 + 伪 `uci`(记录每条 `uci` 调用、KV 存状态)跑了最小场景,只替换了 `/sys/class/net` 路径、其余脚本原样:
+  - WAN:首次安装(默认 dhcp)仍写 dhcp/dhcpv6;首次安装 + `enable_pppoe=yes` 仍写 PPPoE;保留配置升级(pppoe + 账号密码)对 WAN 无任何 `uci set`。
+  - LAN:首次安装(`192.168.1.1`/static)仍写 `lan.proto=static`、掩码与 `custom_router_ip`;保留配置升级(`192.168.100.1`)对 LAN 无任何 `uci set`,状态前后一致。
 - 历史参考(**非当前版本验收**):`Autobuild` Release 于 2026-05-17 曾以定制态构建出 r3s/r4s 固件(资产当时仍在)。这不代表当前 `25.12.2` 及最新依赖的端到端结果。
 - 结论:**代码/Git 核验、依赖一手核实、APK 投放机制实测、静态与运行时检查均已通过;端到端实机构建本轮未执行。**
 

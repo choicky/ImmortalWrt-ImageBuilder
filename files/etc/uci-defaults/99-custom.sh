@@ -96,34 +96,50 @@ elif [ "$count" -gt 1 ]; then
         uci set network.wan6.proto='dhcpv6'
     fi
 
-    # 查找 br-lan 设备 section
-    section=$(uci show network | awk -F '[.=]' '/\.@?device\[\d+\]\.name=.br-lan.$/ {print $2; exit}')
-    if [ -z "$section" ]; then
-        echo "error：cannot find device 'br-lan'." >>$LOGFILE
-    else
-        # 删除原有ports
-        uci -q delete "network.$section.ports"
-        # 添加LAN接口端口
-        for port in $lan_ifnames; do
-            uci add_list "network.$section.ports"="$port"
-        done
-        echo "Updated br-lan ports: $lan_ifnames" >>$LOGFILE
+    # 判断 LAN 是否还是固件预置的默认配置。固件默认 LAN 是 proto=static、
+    # ipaddr=192.168.1.1/24;保留配置升级时这里已换成用户的值(本脚本首次运行会
+    # 改成 custom_router_ip 或 192.168.100.1,用户也可能再改),不能无条件覆盖。
+    lan_ipaddr=$(uci -q get network.lan.ipaddr)
+    lan_proto=$(uci -q get network.lan.proto)
+    lan_configured=0
+    if [ -n "$lan_ipaddr" ] && [ "$lan_ipaddr" != "192.168.1.1" ]; then
+        lan_configured=1
+    elif [ -n "$lan_proto" ] && [ "$lan_proto" != "static" ]; then
+        lan_configured=1
     fi
 
-    # LAN口设置静态IP
-    uci set network.lan.proto='static'
-    # 多网口设备 支持修改为别的管理后台地址 在Github Action 的UI上自行输入即可 
-    uci set network.lan.netmask='255.255.255.0'
-    # 设置路由器管理后台地址
-    IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
-    if [ -f "$IP_VALUE_FILE" ]; then
-        CUSTOM_IP=$(cat "$IP_VALUE_FILE")
-        # 用户在UI上设置的路由器后台管理地址
-        uci set network.lan.ipaddr=$CUSTOM_IP
-        echo "custom router ip is $CUSTOM_IP" >> $LOGFILE
+    if [ "$lan_configured" -eq 1 ]; then
+        echo "existing LAN config detected (ipaddr=$lan_ipaddr), keep LAN untouched." >>$LOGFILE
     else
-        uci set network.lan.ipaddr='192.168.100.1'
-        echo "default router ip is 192.168.100.1" >> $LOGFILE
+        # 查找 br-lan 设备 section
+        section=$(uci show network | awk -F '[.=]' '/\.@?device\[\d+\]\.name=.br-lan.$/ {print $2; exit}')
+        if [ -z "$section" ]; then
+            echo "error：cannot find device 'br-lan'." >>$LOGFILE
+        else
+            # 删除原有ports
+            uci -q delete "network.$section.ports"
+            # 添加LAN接口端口
+            for port in $lan_ifnames; do
+                uci add_list "network.$section.ports"="$port"
+            done
+            echo "Updated br-lan ports: $lan_ifnames" >>$LOGFILE
+        fi
+
+        # LAN口设置静态IP
+        uci set network.lan.proto='static'
+        # 多网口设备 支持修改为别的管理后台地址 在Github Action 的UI上自行输入即可 
+        uci set network.lan.netmask='255.255.255.0'
+        # 设置路由器管理后台地址
+        IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
+        if [ -f "$IP_VALUE_FILE" ]; then
+            CUSTOM_IP=$(cat "$IP_VALUE_FILE")
+            # 用户在UI上设置的路由器后台管理地址
+            uci set network.lan.ipaddr=$CUSTOM_IP
+            echo "custom router ip is $CUSTOM_IP" >> $LOGFILE
+        else
+            uci set network.lan.ipaddr='192.168.100.1'
+            echo "default router ip is 192.168.100.1" >> $LOGFILE
+        fi
     fi
 
     # PPPoE设置(仅首次安装、WAN 仍是固件默认时写入;已有用户配置则不动)
