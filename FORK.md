@@ -74,12 +74,16 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-singbox-admin"
 sysupgrade -l | grep -E '^/etc/(config/(network|zerotier|firewall|singbox)|sing-box/|wg-site\.key)'
 ```
 
-期望至少看到 `/etc/config/network`、(装了 ZeroTier 时)`/etc/config/zerotier`、(之前装过面板时)`/etc/config/singbox`。旧固件通常看不到 `/etc/wg-site.key` 与 `/etc/sing-box/`——它们默认不在任何清单里,按需要补:
+期望至少看到 `/etc/config/network` 与(装了 ZeroTier 时)`/etc/config/zerotier`。旧固件通常看不到 `/etc/wg-site.key` 与 `/etc/sing-box/`——它们默认不在任何清单里,按需要补。`/etc/config/singbox` 单独判断:**文件存在但没出现在 `sysupgrade -l` 的清单里,就在首次升级前把它加进 `/etc/sysupgrade.conf`;已经列入备份、或该文件根本不存在,则不需要任何操作**(面板还没装过时不要凭空添加这一行)。
 
 ```sh
 echo /etc/wg-site.key  >> /etc/sysupgrade.conf   # WireGuard 私钥备份副本
 echo /etc/sing-box/    >> /etc/sysupgrade.conf   # sing-box 的 config.json / nftables.sh
-sysupgrade -l | grep -E 'wg-site\.key|sing-box/'  # 复查
+# 仅当面板设置已存在、但还没进备份清单时才补:
+if [ -f /etc/config/singbox ] && ! sysupgrade -l | grep -qx /etc/config/singbox; then
+  echo /etc/config/singbox >> /etc/sysupgrade.conf
+fi
+sysupgrade -l | grep -E 'wg-site\.key|sing-box/|config/singbox'  # 复查
 ```
 
 缺其他路径(例如自定义的 ZeroTier `config_path`)同样追加到 `/etc/sysupgrade.conf`,复查通过后再升级。从本固件之后再升级,这些路径已由镜像内的 `keep.d` 自动覆盖,不必重复添加。
