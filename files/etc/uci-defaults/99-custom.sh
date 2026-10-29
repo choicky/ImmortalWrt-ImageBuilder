@@ -69,15 +69,32 @@ if [ "$count" -eq 1 ]; then
     uci commit network
 elif [ "$count" -gt 1 ]; then
     # 多网口设备配置
-    # 配置WAN
-    uci set network.wan=interface
-    uci set network.wan.device="$wan_ifname"
-    uci set network.wan.proto='dhcp'
+    # 判断 WAN 是否已经是用户配置。本脚本在 sysupgrade 保留配置升级后也会再跑一次,
+    # 此时 /etc/config/network 是用户还原的配置,不能无条件改写成 DHCP。
+    # 固件预置的默认 WAN 是 dhcp 且没有拨号凭据;出现 PPPoE/静态等协议或拨号账号,
+    # 即视为用户配置,本次跳过 WAN/WAN6 的协议、设备与拨号凭据改写。
+    wan_proto=$(uci -q get network.wan.proto)
+    wan_username=$(uci -q get network.wan.username)
+    wan_configured=0
+    if [ -n "$wan_username" ]; then
+        wan_configured=1
+    elif [ -n "$wan_proto" ] && [ "$wan_proto" != "dhcp" ] && [ "$wan_proto" != "none" ]; then
+        wan_configured=1
+    fi
 
-    # 配置WAN6
-    uci set network.wan6=interface
-    uci set network.wan6.device="$wan_ifname"
-    uci set network.wan6.proto='dhcpv6'
+    if [ "$wan_configured" -eq 1 ]; then
+        echo "existing WAN config detected (proto=$wan_proto), keep WAN untouched." >>$LOGFILE
+    else
+        # 配置WAN
+        uci set network.wan=interface
+        uci set network.wan.device="$wan_ifname"
+        uci set network.wan.proto='dhcp'
+
+        # 配置WAN6
+        uci set network.wan6=interface
+        uci set network.wan6.device="$wan_ifname"
+        uci set network.wan6.proto='dhcpv6'
+    fi
 
     # 查找 br-lan 设备 section
     section=$(uci show network | awk -F '[.=]' '/\.@?device\[\d+\]\.name=.br-lan.$/ {print $2; exit}')
@@ -109,9 +126,11 @@ elif [ "$count" -gt 1 ]; then
         echo "default router ip is 192.168.100.1" >> $LOGFILE
     fi
 
-    # PPPoE设置
+    # PPPoE设置(仅首次安装、WAN 仍是固件默认时写入;已有用户配置则不动)
     echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE
-    if [ "$enable_pppoe" = "yes" ]; then
+    if [ "$wan_configured" -eq 1 ]; then
+        echo "keep existing WAN (proto=$wan_proto), skip PPPoE rewrite." >>$LOGFILE
+    elif [ "$enable_pppoe" = "yes" ]; then
         echo "PPPoE enabled, configuring..." >>$LOGFILE
         uci set network.wan.proto='pppoe'
         uci set network.wan.username="$pppoe_account"
