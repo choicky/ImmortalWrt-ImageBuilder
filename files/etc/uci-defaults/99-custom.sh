@@ -69,49 +69,84 @@ if [ "$count" -eq 1 ]; then
     uci commit network
 elif [ "$count" -gt 1 ]; then
     # 多网口设备配置
-    # 配置WAN
-    uci set network.wan=interface
-    uci set network.wan.device="$wan_ifname"
-    uci set network.wan.proto='dhcp'
-
-    # 配置WAN6
-    uci set network.wan6=interface
-    uci set network.wan6.device="$wan_ifname"
-    uci set network.wan6.proto='dhcpv6'
-
-    # 查找 br-lan 设备 section
-    section=$(uci show network | awk -F '[.=]' '/\.@?device\[\d+\]\.name=.br-lan.$/ {print $2; exit}')
-    if [ -z "$section" ]; then
-        echo "error：cannot find device 'br-lan'." >>$LOGFILE
-    else
-        # 删除原有ports
-        uci -q delete "network.$section.ports"
-        # 添加LAN接口端口
-        for port in $lan_ifnames; do
-            uci add_list "network.$section.ports"="$port"
-        done
-        echo "Updated br-lan ports: $lan_ifnames" >>$LOGFILE
+    # 判断 WAN 是否已经是用户配置。本脚本在 sysupgrade 保留配置升级后也会再跑一次,
+    # 此时 /etc/config/network 是用户还原的配置,不能无条件改写成 DHCP。
+    # 固件预置的默认 WAN 是 dhcp 且没有拨号凭据;出现 PPPoE/静态等协议或拨号账号,
+    # 即视为用户配置,本次跳过 WAN/WAN6 的协议、设备与拨号凭据改写。
+    wan_proto=$(uci -q get network.wan.proto)
+    wan_username=$(uci -q get network.wan.username)
+    wan_configured=0
+    if [ -n "$wan_username" ]; then
+        wan_configured=1
+    elif [ -n "$wan_proto" ] && [ "$wan_proto" != "dhcp" ] && [ "$wan_proto" != "none" ]; then
+        wan_configured=1
     fi
 
-    # LAN口设置静态IP
-    uci set network.lan.proto='static'
-    # 多网口设备 支持修改为别的管理后台地址 在Github Action 的UI上自行输入即可 
-    uci set network.lan.netmask='255.255.255.0'
-    # 设置路由器管理后台地址
-    IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
-    if [ -f "$IP_VALUE_FILE" ]; then
-        CUSTOM_IP=$(cat "$IP_VALUE_FILE")
-        # 用户在UI上设置的路由器后台管理地址
-        uci set network.lan.ipaddr=$CUSTOM_IP
-        echo "custom router ip is $CUSTOM_IP" >> $LOGFILE
+    if [ "$wan_configured" -eq 1 ]; then
+        echo "existing WAN config detected (proto=$wan_proto), keep WAN untouched." >>$LOGFILE
     else
-        uci set network.lan.ipaddr='192.168.100.1'
-        echo "default router ip is 192.168.100.1" >> $LOGFILE
+        # 配置WAN
+        uci set network.wan=interface
+        uci set network.wan.device="$wan_ifname"
+        uci set network.wan.proto='dhcp'
+
+        # 配置WAN6
+        uci set network.wan6=interface
+        uci set network.wan6.device="$wan_ifname"
+        uci set network.wan6.proto='dhcpv6'
     fi
 
-    # PPPoE设置
+    # 判断 LAN 是否还是固件预置的默认配置。固件默认 LAN 是 proto=static、
+    # ipaddr=192.168.1.1/24;保留配置升级时这里已换成用户的值(本脚本首次运行会
+    # 改成 custom_router_ip 或 192.168.100.1,用户也可能再改),不能无条件覆盖。
+    lan_ipaddr=$(uci -q get network.lan.ipaddr)
+    lan_proto=$(uci -q get network.lan.proto)
+    lan_configured=0
+    if [ -n "$lan_ipaddr" ] && [ "$lan_ipaddr" != "192.168.1.1" ]; then
+        lan_configured=1
+    elif [ -n "$lan_proto" ] && [ "$lan_proto" != "static" ]; then
+        lan_configured=1
+    fi
+
+    if [ "$lan_configured" -eq 1 ]; then
+        echo "existing LAN config detected (ipaddr=$lan_ipaddr), keep LAN untouched." >>$LOGFILE
+    else
+        # 查找 br-lan 设备 section
+        section=$(uci show network | awk -F '[.=]' '/\.@?device\[\d+\]\.name=.br-lan.$/ {print $2; exit}')
+        if [ -z "$section" ]; then
+            echo "error：cannot find device 'br-lan'." >>$LOGFILE
+        else
+            # 删除原有ports
+            uci -q delete "network.$section.ports"
+            # 添加LAN接口端口
+            for port in $lan_ifnames; do
+                uci add_list "network.$section.ports"="$port"
+            done
+            echo "Updated br-lan ports: $lan_ifnames" >>$LOGFILE
+        fi
+
+        # LAN口设置静态IP
+        uci set network.lan.proto='static'
+        # 多网口设备 支持修改为别的管理后台地址 在Github Action 的UI上自行输入即可 
+        uci set network.lan.netmask='255.255.255.0'
+        # 设置路由器管理后台地址
+        IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
+        if [ -f "$IP_VALUE_FILE" ]; then
+            CUSTOM_IP=$(cat "$IP_VALUE_FILE")
+            # 用户在UI上设置的路由器后台管理地址
+            uci set network.lan.ipaddr=$CUSTOM_IP
+            echo "custom router ip is $CUSTOM_IP" >> $LOGFILE
+        else
+            uci set network.lan.ipaddr='192.168.100.1'
+            echo "default router ip is 192.168.100.1" >> $LOGFILE
+        fi
+    fi
+
+    # PPPoE设置(仅首次安装、WAN 仍是固件默认时写入;已有用户配置则不动)
     echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE
-    if [ "$enable_pppoe" = "yes" ]; then
+    if [ "$wan_configured" -eq 1 ]; then
+        echo "keep existing WAN (proto=$wan_proto), skip PPPoE rewrite." >>$LOGFILE
+    elif [ "$enable_pppoe" = "yes" ]; then
         echo "PPPoE enabled, configuring..." >>$LOGFILE
         uci set network.wan.proto='pppoe'
         uci set network.wan.username="$pppoe_account"
