@@ -12,7 +12,9 @@
 ## 2. 个人定制(仅 25.12.x)
 
 ### 位置
-定制只改一个文件:**`shell/apk-custom-packages.sh`**,取消其中两行的注释(Aurora 主题行、PassWall 行)。
+定制由两部分组成:
+1. **包清单:`shell/apk-custom-packages.sh`** —— 取消其中两行的注释(Aurora 主题行、PassWall 行)。
+2. **官方 sing-box 自动集成(2026-11 新增)** —— 共享辅助脚本 `shell/apk-sing-box.sh`,由 `rockchip/build25.sh` 与 `x86-64/build25.sh` 在 `make image` 前调用。其余平台脚本未挂接此机制。
 
 ### 生效范围:为什么只有 25.12.x
 - 25.12.x 使用 APK 包管理,其构建脚本 `*/build25.sh` 会 `source shell/apk-custom-packages.sh`(rockchip、x86-64、mediatek-filogic、sunxi-cortexa53 的 build25 均是),清单里的 `CUSTOM_PACKAGES` 随后被并入 `make image ... PACKAGES=...`。
@@ -27,11 +29,22 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-theme-aurora luci-app-aurora-config luci-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES xray-core sing-box hysteria luci-i18n-passwall-zh-cn"
 ```
 
+### 官方 sing-box 自动集成(2026-11)
+每次构建若最终包清单请求了 `sing-box`(本 fork 的 PassWall 行即会),`build25.sh` 在 `make image` 前调用 `shell/apk-sing-box.sh`(rockchip 与 x86-64 共享同一实现,仅传入的架构参数不同):
+
+- **版本发现:** 走官方 `SagerNet/sing-box` 的 `releases/latest` API(该端点本身排除 prerelease/draft,已实测 `v1.15.0-alpha.x` 不会命中;helper 再以 `vX.Y.Z` 正则二次把关)。一次构建只解析一次,整场构建固定该版本。
+- **下载与校验:** 取对应架构的官方 OpenWrt 资产 `sing-box_<ver>_openwrt_<arch>.apk`(rockchip=aarch64_generic,x86-64=x86_64)下载并用 API 资产元数据里的 `digest` 字段做 sha256 比对,校验通过后**改以规范文件名 `sing-box-<版本>-r<修订>.apk` 存入 IB `packages/`**(`apk mkndx` 在索引中记录由包元数据推导的文件名;保留官方下划线资产名会在真实安装阶段报 `package mentioned in index not found`,已实测);下载或校验失败即失败。
+- **索引与预解析:** 绝不改写 `packages/packages.adb` —— 该 IB 默认 `CONFIG_SIGNATURE_CHECK=y`,`make image` 会用本地密钥自行重建**签名**索引;helper 若抢先写出未签名索引,会被 apk 整体拒收,连带 packages/ 内所有本地包(aurora、passwall 捆绑包等)`no such package`(已实测)。helper 改为:在临时目录软链 `packages/` 全部 `.apk` 后 `mkndx` 出只读临时索引,从索引元数据读含修订号的精确版本(**不假设修订恒为 -r0**;若 `policy` 命中多版本——如 passwall run 捆绑的旧 sing-box——必须精确匹配本次发布版本,否则中止);再以构建同款仓库组合(`repositories` 远程索引 + 临时索引)`apk add --simulate sing-box`,确认裸名恰好解析到该官方版本,不符即中止。helper stdout 输出精确版本(如 `1.14.4-r0`)供构建后核验。
+- **为何不把 `name=version` 钉定传进 PACKAGES:** IB Makefile 的 `FormatPackages` 存在评测粘连 quirk——命令行钉定版本会传染给其后所有包(实测产生 `libgcc1=1.14.4-r0` 等连锁 unsatisfiable,整场解析崩溃)。生效方式为裸名 `sing-box` 取最高版本(官方稳定版恒高于 feed 与 run 捆绑版,且预解析把关)。
+- **拒绝静默回退:** 发现/下载/校验/索引/改名/预解析任一步失败 → helper 非零退出 → `build25.sh` 终止构建。构建后再从镜像清单 `bin/targets/*/*/*.manifest` 断言实际装入的 sing-box 版本与 helper 判定一致,不符同样终止(Release 上传步骤不会执行)。rootfs 的 `lib/apk/db/installed` 为 NUL 分隔记录格式,不便直读,故选 manifest 作核验源(两者由同一安装事务生成,内容一致)。
+- **保留裸声明:** `apk-custom-packages.sh` 的 `sing-box` 一项不改;官方最新稳定版高于 feed(25.12.1:1.12.x)与 passwall run 捆绑版(实测 1.13.14-r1),裸名解析即选中官方版。
+- **服务不自启:** 官方包 uci 默认 `enabled '1'`,feed 包为 `'0'`。helper 写入 `files/etc/config/sing-box`(仅 `enabled '0'`,其余字段与官方包一致)经 IB 的 FILES 叠加覆盖包内默认,新固件与旧行为一致(sing-box 服务不自启;PassWall 自行拉起其实例,不走该 init 脚本)。此叠加只作用于新构建镜像;设备侧既有配置在 sysupgrade 中按 conffile 正常保留,不会被覆盖。
+
 ### 依赖语义(附一手核验证据,核验于 2026-10-21)
 - **PassWall 本体会被装入。** 清单只请求 `luci-i18n-passwall-zh-cn`(中文语言包),未显式列 `luci-app-passwall` 本体;经一手证据核实本体会随依赖被拉入:
   - ImmortalWrt `luci` feed 的打包模板 `luci.mk` 会为每种语言生成 `luci-i18n-<pkg>-<lang>` 子包并设 `DEPENDS:=$(PKG_NAME)`,故 `luci-i18n-passwall-zh-cn` 依赖 `luci-app-passwall`;`make image PACKAGES=…` 按 apk 依赖解析,请求 i18n 即拉入本体。
   - 25.12.x 构建经 `build25.sh` 从 `wukongdaily/apk` 解包:PassWall run(26.6.2)实际捆绑了 `luci-app-passwall`、`luci-i18n-passwall-zh-cn`、`xray-core`、`sing-box`、`hysteria`、`geoview` 及 chinadns-ng / dns2socks / tcping / v2ray-geoip / v2ray-geosite 等 apk,统一收集进本地 `packages/` 供解析安装。
-  - 证据边界:上述依据来自打包规则(`luci.mk` 源码)与捆绑包清单(一手);**本机未能解析预构建 `.apk` 的二进制 `.PKGINFO`**(`ADBd` 容器,本地无对应解析器)。因此单个预构建 apk 内 `depend` 字面串未做二进制级复核。
+  - 证据边界(2026-11 更新):此前"本机无法解析预构建 `.apk` 二进制元数据"的限制已解除——IB 自带 `staging_dir/host/bin/apk`(apk-tools 3.0.5)可直接对 `ADBd` 容器 `mkndx`/`policy` 查询,官方 sing-box 集成即依赖该通道;Sing-box 包版本、依赖与索引行为已另经本地完整 `make image`(nanopi-r4s)实测复核(见上节与 §6)。
 - **`geoview` 定性。** `geoview` 是 `luci-app-passwall` 的构建期 `select`(`INCLUDE_Geoview` 在 aarch64 默认 `y`),其 apk 已随 run 捆绑于 `packages/`,会作为本体的传递依赖被自动解析。故清单**无需显式列出 `geoview`**;列出与自动解析结果等价,显式列出反而与传递解析重复。上游把 `geoview` 写进该行只是显式化。**最终固件仍会包含 geoview**(经本体依赖)。本定制**不改用 PassWall2**。
 - **Aurora 无缺失本体。** `aurora/` 捆绑的正是清单所请求的 `luci-theme-aurora`、`luci-app-aurora-config`、`luci-i18n-aurora-config-zh-cn` 三项。
 
@@ -92,7 +105,7 @@ git push origin custom
 - 历史备份见第 7 节,已在任何历史改写之前推送并验证,备份分支/标签均指向 `990b069`(稳定)。
 
 **B. 代码 / Git 状态 —— 已独立核验(通过)**
-- `custom` 相对 `master`:**参与构建的改动**仅为 `shell/apk-custom-packages.sh`(两行定制 + 一行说明注释);另有本维护文档 `FORK.md`(**不参与构建**)。
+- `custom` 相对 `master`:**参与构建的改动**为 `shell/apk-custom-packages.sh`(两行定制 + 一行说明注释)、`shell/apk-sing-box.sh`(官方 sing-box 集成 helper,2026-11 新增)及 `rockchip/build25.sh`、`x86-64/build25.sh` 的挂接;另有本维护文档 `FORK.md`(**不参与构建**)。
 - `shell/custom-packages.sh` 未被改动 → 24.10.x 及更早不包含本 fork 新增的个人定制。
 - 语法检查(`bash -n` / `sh -n`):`apk-custom-packages.sh`、`custom-packages.sh`、`rockchip/build25.sh`、`apk-prepare-packages.sh` 均通过。
 - 运行时解析(非破坏性):
@@ -101,16 +114,17 @@ git push origin custom
   # 得到:luci-theme-aurora luci-app-aurora-config luci-i18n-aurora-config-zh-cn \
   #      xray-core sing-box hysteria luci-i18n-passwall-zh-cn  (无重复项)
   ```
-- 调用链:25.12.x 工作流 → 挂载并执行 `rockchip/build25.sh` → `source shell/apk-custom-packages.sh` → `make image PACKAGES=…`。
+- 调用链:25.12.x 工作流 → 挂载并执行 `rockchip/build25.sh` → `source shell/apk-custom-packages.sh` → (清单含 sing-box 时)`sh shell/apk-sing-box.sh …`(官方包下载+校验+规范名落盘+临时索引预解析,stdout 输出精确版本)→ `make image PACKAGES=…`(make 自行重建签名索引并装入)→ 构建后从 manifest 核验已装版本。
 
 **C. 软件包依赖 —— 已一手核实(见第 2 节)**
 - 已核实 `luci-i18n-passwall-zh-cn` 经 `luci.mk` 依赖并拉入 `luci-app-passwall` 本体;PassWall run 26.6.2 捆绑本体与全部相关 apk;`geoview` 为本体的传递依赖,会自动包含,无需显式列出。
-- 未做(已如实标注):本机未解析预构建 `.apk` 的二进制 `.PKGINFO`(`ADBd` 容器无本地解析器)。
+- ~~未做:本机未解析预构建 `.apk` 的二进制 `.PKGINFO`~~(2026-11 已解除:IB 自带 `staging_dir/host/bin/apk` 可解析 `ADBd` 容器;并已通过一次本地完整 `make image` 实测依赖解析,见 D)。
 
-**D. 静态检查通过,端到端实构建未执行**
-- 未在本轮执行全新的固件实构建:本机无 docker;且经 GitHub Actions 实跑会覆盖既有 `Autobuild` Release 资产(受约束不得为验证而覆盖重要产物)。
+**D. 静态检查与本地端到端构建**
+- 2026-10-21 轮:未执行实构建(本机无 docker;经 GitHub Actions 实跑会覆盖既有 `Autobuild` Release 资产)。
 - 历史参考(**非当前版本验收**):`Autobuild` Release 于 2026-05-17 曾以定制态构建出 r3s/r4s 固件(资产当时仍在)。这不代表当前 `25.12.2` 及最新依赖的端到端结果。
-- 结论:**分支规范化、代码/Git 核验、依赖一手核实、静态与运行时检查均已通过;端到端实机构建本轮未执行。**
+- 2026-11-01 轮(官方 sing-box 集成):在免 docker 环境下用 `immortalwrt-imagebuilder-25.12.1-rockchip-armv8` 复刻了 build25.sh 全链路(第三方 run 解包 → `apk-sing-box.sh` → `make image PROFILE=friendlyarm_nanopi-r4s`),端到端构建成功并在产物 manifest 中核验 `sing-box - 1.14.4-r0`(helper 判定版本),同时核验临时索引预解析、make 签名索引重建、依赖装入与 rootfs 内 `enabled '0'` 配置覆盖(rc.d 存在 `S99sing-box` 链接,但 init 脚本以 uci `enabled` 为准,不自启);过程中实测排除了两条回退路径:未签名索引整体失效与官方下划线资产文件名不被索引识别。**未触发 GitHub Actions,未覆盖 `Autobuild` Release,未刷机**。x86-64 路径复用同一 helper,仅架构参数不同(未本地实跑)。
+- 结论:**分支规范化、代码/Git 核验、依赖一手核实、静态与运行时检查均已通过;sing-box 官方集成已有本地端到端实测;CI 实机构建仍待维护者按 E 自行触发。**
 
 **E. 待维护者确认 / 执行**
 - 如需最终确认定制在实机构建中被正确包含:在 `custom` 分支按第 4 节触发一次 "Build 25.12.x Rockchip"(profile 选 r3s 或 r4s),并**接受该操作会更新 `Autobuild` Release**。构建产物应含 PassWall、Aurora;如清单某项在最新 feed 中解析失败,再据错误信息做最小调整。
