@@ -191,7 +191,7 @@ git push origin custom
 
 **A. 分支规范化 —— 已完成**
 - `master` 纯上游:`origin/master == upstream/master == c2744d7`(ahead/behind **0/0**,tree 完全一致)。此 SHA 稳定,不受本轮收尾影响。
-- `custom` 从规范化后的 `master` 派生,`master` 是其**祖先**;其内容 = `master` + `shell/apk-custom-packages.sh` 的定制行 + `shell/apk-prepare-packages.sh` 的固定版本 APK 投放 + `files/lib/upgrade/keep.d/wg-site` + `files/etc/uci-defaults/99-custom.sh` 的网络初始化判断 + 本 `FORK.md` 维护文档。`custom` 的**头条 SHA 与领先提交数会随文档提交而推进**,请以 `git rev-parse custom`、`git rev-list --left-right --count master...custom` 实测为准,本文不硬编码,以免收尾后再漂移。
+- `custom` 从规范化后的 `master` 派生,`master` 是其**祖先**;其内容 = `master` + `shell/apk-custom-packages.sh` 的定制行 + `shell/apk-prepare-packages.sh` 的固定版本 APK 投放 + `files/lib/upgrade/keep.d/wg-site` + `files/etc/uci-defaults/99-custom.sh` 的网络初始化判断 + `shell/apk-sing-box.sh`(官方 sing-box 集成 helper)及 `rockchip/build25.sh`、`x86-64/build25.sh` 的挂接 + 本 `FORK.md` 维护文档。`custom` 的**头条 SHA 与领先提交数会随文档提交而推进**,请以 `git rev-parse custom`、`git rev-list --left-right --count master...custom` 实测为准,本文不硬编码,以免收尾后再漂移。
 - 历史备份见第 7 节,已在任何历史改写之前推送并验证,备份分支/标签均指向 `990b069`(稳定)。
 
 **B. 代码 / Git 状态 —— 已独立核验(通过)**
