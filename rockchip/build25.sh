@@ -106,12 +106,38 @@ else
     echo "⚪️ 未选择 luci-app-ssr-plus"
 fi
 
+# ======== shell/apk-sing-box.sh =======
+# choicky 定制:若清单请求 sing-box,则集成官方最新稳定版 APK(rockchip 为 aarch64_generic)。
+# helper 下载+sha256 校验+按 mkndx 规范名落盘+临时索引预解析核验版本(绝不改写
+# packages/packages.adb,签名索引由 make 自行重建);任一步失败即中止构建,
+# 绝不静默回退 feed 旧版。不把 name=version 钉定传入 PACKAGES(IB FormatPackages
+# 存在钉定粘连 quirk,会传染其后所有包);apk 取最高版本,官方版恒高于 feed/run 捆绑版。
+SB_VERSION=""
+if echo " $PACKAGES " | grep -qE ' sing-box '; then
+    SB_VERSION="$(sh shell/apk-sing-box.sh aarch64_generic /home/build/immortalwrt/packages /home/build/immortalwrt/files/etc/config)" || {
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Error: official sing-box integration failed, aborting (no fallback to feed version)!"
+        exit 1
+    }
+    echo "🔒 官方 sing-box 目标版本: $SB_VERSION (helper 已预解析核验)"
+fi
 
 make image PROFILE=$PROFILE PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$ROOTFS_PARTSIZE
 
 if [ $? -ne 0 ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Error: Build failed!"
     exit 1
+fi
+
+# 构建后校验:镜像清单里的 sing-box 版本必须是 helper 判定的官方版本
+# (rootfs 的 apk installed 数据库是 NUL 分隔记录,不便直读;manifest 与之一致)
+if [ -n "$SB_VERSION" ]; then
+    SB_MANIFEST="$(ls -t bin/targets/*/*/*.manifest 2>/dev/null | head -n1)"
+    SB_INSTALLED="$(awk -F' - ' '$1=="sing-box"{print $2; exit}' "$SB_MANIFEST" 2>/dev/null)"
+    if [ "$SB_INSTALLED" != "$SB_VERSION" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Error: installed sing-box mismatch (expect $SB_VERSION, got '${SB_INSTALLED:-none}')!"
+        exit 1
+    fi
+    echo "✅ 已核验固件内 sing-box 版本: $SB_INSTALLED (官方)"
 fi
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Build completed successfully."
