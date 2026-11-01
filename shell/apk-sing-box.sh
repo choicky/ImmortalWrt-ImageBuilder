@@ -44,7 +44,9 @@ APKB="$ROOT/staging_dir/host/bin/apk"
 JSON="$(mktemp)"
 DBTMP="$(mktemp -d)"
 TMPIDX=""
-trap 'rm -f "$JSON"; rm -rf "$DBTMP" "$TMPIDX"' EXIT
+SIM_OUT=""
+SIM_ERR=""
+trap 'rm -f "$JSON" "$SIM_OUT" "$SIM_ERR"; rm -rf "$DBTMP" "$TMPIDX"' EXIT
 
 # 1) 发现最新稳定版
 API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
@@ -98,15 +100,31 @@ if [ "$ASSET" != "sing-box-$FULLVER.apk" ]; then
     ln -sf "$PKG_DIR/$ASSET" "$TMPIDX/" 2>/dev/null || true
 fi
 
-# 4) 预解析确认:按构建同款仓库组合(repositories 远程索引 + 临时本地索引),
-#    裸名 sing-box 必须恰好解析到本次官方版本;否则(如更高版本混入)立即失败。
-RESOLVED="$("$APKB" --root "$DBTMP" --arch "$SB_ARCH" \
+# 4) 预解析确认:与 make image 同款仓库组合(repositories 远程索引 + 临时本地索引),
+#    裸名 sing-box 必须恰好解析到本次官方版本;否则(如更高混入版本)立即失败。
+#    apk add --simulate 不会自行下载远程索引,只从 --cache-dir 读取;ImageBuilder 的
+#    dl 缓存要到 make 阶段才生成(CI 镜像里连 dl 目录都不存在,直接 simulate 会以
+#    "Unable to setup the cache" 或依赖 "no such package" 失败)。故先 mkdir dl 并用
+#    apk update 拉取远程索引,复现构建时的解析环境;update/simulate 的真实 stderr 一律
+#    留存,解析为空时据实报错,绝不静默吞掉 apk 错误。
+CACHE_DIR="$ROOT/dl"
+mkdir -p "$CACHE_DIR" || err "无法创建下载缓存目录: $CACHE_DIR"
+SIM_OUT="$(mktemp)"
+SIM_ERR="$(mktemp)"
+UC_RC=0
+"$APKB" --root "$DBTMP" --arch "$SB_ARCH" \
+    --repositories-file "$ROOT/repositories" \
+    --cache-dir "$CACHE_DIR" --allow-untrusted --no-progress \
+    update >"$SIM_OUT" 2>"$SIM_ERR" || UC_RC=$?
+[ "$UC_RC" -eq 0 ] || err "预解析失败:apk update 拉取远程索引出错(退出码 $UC_RC): $(sed -n '/^ERROR: /{s/^ERROR: //;p;q}' "$SIM_ERR")"
+SIM_RC=0
+"$APKB" --root "$DBTMP" --arch "$SB_ARCH" \
     --repositories-file "$ROOT/repositories" \
     --repository "$TMPIDX/packages.adb" \
-    --allow-untrusted --cache-dir "$ROOT/dl" --no-progress \
-    add --simulate sing-box 2>/dev/null \
-    | sed -n 's/^([^)]*) Installing sing-box (\([^)]*\))$/\1/p' | head -n1)"
-[ -n "$RESOLVED" ] || err "预解析失败:apk add --simulate sing-box 无结果(仓库不可达或依赖无法满足)"
+    --allow-untrusted --cache-dir "$CACHE_DIR" --no-progress \
+    add --simulate sing-box >"$SIM_OUT" 2>"$SIM_ERR" || SIM_RC=$?
+RESOLVED="$(sed -n 's/^([^)]*) Installing sing-box (\([^)]*\))$/\1/p' "$SIM_OUT" | head -n1)"
+[ -n "$RESOLVED" ] || err "预解析失败:apk add --simulate sing-box 未解析出版本(退出码 $SIM_RC): $(sed -n '/^ERROR: /{s/^ERROR: //;p;q}' "$SIM_ERR")"
 [ "$RESOLVED" = "$FULLVER" ] || err "sing-box 将解析到 $RESOLVED 而非官方 $FULLVER(存在更高混入版本或索引异常),已中止"
 
 # 5) 覆盖默认 uci 配置:保持服务默认不自启(feed 行为)
